@@ -5,28 +5,22 @@ export const maxDuration = 30;
 
 export async function POST(req: Request) {
     const { messages } = await req.json();
+    console.log('POST messages', messages)
 
-    const result = streamText({
-        model: qwen17BModel,
-        messages,
-        tools: {
-            weather: tool({
-                description: 'Get the weather in a location (fahrenheit)',
-                parameters: z.object({
-                    location: z.string().describe('The location to get the weather for'),
-                }),
-                execute: async ({ location }) => {
-                    const temperature = Math.round(Math.random() * (90 - 32) + 32);
-                    return {
-                        location,
-                        temperature,
-                    };
-                },
-            }),
-        },
-    });
+    try {
+        const result = streamText({
+            model: qwen17BModel,
+            messages,
+            tools: {
 
-    return result.toDataStreamResponse();
+            },
+        });
+
+        return result.toDataStreamResponse();
+    } catch (error) {
+        console.log('Error in POST:', error);
+    }
+
 }
 
 import { ReadableStream } from 'node:stream/web';
@@ -40,13 +34,14 @@ const qwen17BModel = {
 
     // 实现流式生成方法
     doStream: async (options: any) => {
-        const { input, tools, settings } = options;
+        const { prompt, tools, settings } = options;
+        console.log('doStream messages', JSON.stringify(options));
         const apiUrl = 'http://localhost:8888/v1/chat/completions';
 
         // 构建API请求体 [5,7](@ref)
         const body = {
-            model: 'qwen3-1.7b',
-            messages: input.messages,
+            model: '',
+            messages: prompt,
             tools: tools?.map((tool: any) => ({
                 type: 'function',
                 function: {
@@ -69,6 +64,7 @@ const qwen17BModel = {
             },
             body: JSON.stringify(body)
         });
+        console.log(222, JSON.stringify(response))
 
         // 创建可读流 [1](@ref)
         const stream = new ReadableStream({
@@ -79,6 +75,7 @@ const qwen17BModel = {
 
                 while (true) {
                     const { done, value } = await reader.read();
+                    console.log('Reading chunk:', value);
                     if (done) break;
 
                     buffer += decoder.decode(value, { stream: true });
@@ -112,7 +109,7 @@ const qwen17BModel = {
         return {
             stream,
             rawCall: {
-                rawPrompt: input.messages,
+                rawPrompt: prompt.messages,
                 rawSettings: settings
             },
             warnings: []
