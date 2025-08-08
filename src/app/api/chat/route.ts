@@ -1,22 +1,21 @@
-import { streamText, tool } from 'ai';
+import {convertToModelMessages, streamText, tool, UIMessage  } from 'ai';
 import { z } from 'zod';
 
 export const maxDuration = 30;
 
 export async function POST(req: Request) {
-    const { messages } = await req.json();
-    console.log('POST messages', messages)
+    const { messages }: { messages: UIMessage[] } = await req.json();
 
     try {
         const result = streamText({
             model: qwen17BModel,
-            messages,
+            messages: convertToModelMessages(messages),
             tools: {
 
             },
         });
 
-        return result.toDataStreamResponse();
+        return result.toUIMessageStreamResponse();
     } catch (error) {
         console.log('Error in POST:', error);
     }
@@ -25,13 +24,17 @@ export async function POST(req: Request) {
 
 import { ReadableStream } from 'node:stream/web';
 
+const myProvider = createCustomProvider({
+    baseURL: 'http://localhost:8888/v1',
+    headers: { 'Authorization': `Bearer YOUR_API_KEY` }
+});
+
 const qwen17BModel = {
-    specificationVersion: 'v1',
+    specificationVersion: 'v2',
     provider: 'Qwen',
     modelId: 'qwen3-1.7b',
-    defaultObjectGenerationMode: 'json',
-    supportsStructuredOutputs: true, // 支持JSON Schema约束
-
+    supportsStructuredOutputs: false, // 支持JSON Schema约束
+    supportedUrls: ['http://localhost:8888/v1/chat/completions'], // 新增
     // 实现流式生成方法
     doStream: async (options: any) => {
         const { prompt, tools, settings } = options;
@@ -39,30 +42,10 @@ const qwen17BModel = {
         const apiUrl = 'http://localhost:8888/v1/chat/completions';
 
         // 构建API请求体 [5,7](@ref)
-        const body = {
-            model: '',
-            messages: prompt,
-            tools: tools?.map((tool: any) => ({
-                type: 'function',
-                function: {
-                    name: tool.name,
-                    description: tool.description,
-                    parameters: tool.parameters
-                }
-            })),
-            stream: true,
-            temperature: settings?.temperature ?? 0.7,
-            max_tokens: settings?.maxTokens ?? 512
-        };
-
-        // 发起流式请求 [1,5](@ref)
         const response = await fetch(apiUrl, {
             method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${process.env.QWEN_API_KEY}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(body)
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({...options, messages: options.prompt})
         });
         console.log(222, JSON.stringify(response))
 
@@ -71,53 +54,21 @@ const qwen17BModel = {
             async start(controller) {
                 const reader = response.body!.getReader();
                 const decoder = new TextDecoder('utf-8');
-                let buffer = '';
-
                 while (true) {
-                    const { done, value } = await reader.read();
-                    console.log('Reading chunk:', value);
+                    const {done, value} = await reader.read();
                     if (done) break;
-
-                    buffer += decoder.decode(value, { stream: true });
-                    const lines = buffer.split('\n\n');
-
-                    for (const line of lines) {
-                        if (line.startsWith('data:')) {
-                            const jsonStr = line.replace('data:', '').trim();
-                            try {
-                                const event = JSON.parse(jsonStr);
-                                const textChunk = event.choices[0]?.delta?.content || '';
-
-                                // 转换为标准输出格式 [5](@ref)
-                                controller.enqueue({
-                                    type: 'text-delta',
-                                    textDelta: textChunk
-                                });
-                            } catch (e) {
-                                controller.enqueue({
-                                    type: 'error',
-                                    error: `JSON解析错误: ${e.message}`
-                                });
-                            }
-                        }
-                    }
+                    console.log(decoder.decode(value))
+                    controller.enqueue(decoder.decode(value));
                 }
                 controller.close();
             }
         });
 
-        return {
-            stream,
-            rawCall: {
-                rawPrompt: prompt.messages,
-                rawSettings: settings
-            },
-            warnings: []
-        };
+        return { stream, rawCall: options, warnings: [] };
     },
 
     // 非流式生成方法（简略实现）
-    doGenerate: async (options) => {
+    doGenerate: async () => {
         /* 同步请求实现逻辑 */
     }
 };
