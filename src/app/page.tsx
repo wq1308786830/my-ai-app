@@ -1,39 +1,56 @@
 'use client';
 
-import {useChat} from '@ai-sdk/react';
-import {useState} from "react";
+import { useState } from 'react';
+import { Message, continueConversation } from './actions';
+import { readStreamableValue } from '@ai-sdk/rsc';
+import ReactMarkdown from 'react-markdown'
 
-export default function Chat() {
-    const [input, setInput] = useState('');
-    const {messages, sendMessage} = useChat();
+export const maxDuration = 30;
 
-    console.log('messages', messages)
+export default function Home() {
+    const [conversation, setConversation] = useState<Message[]>([]);
+    const [input, setInput] = useState<string>('');
+
     return (
-        <div className="flex flex-col w-full max-w-md py-24 mx-auto stretch">
-            {messages.map(message => (
-                <div key={message.id} className="whitespace-pre-wrap">
-                    {message.role === 'user' ? 'User: ' : 'AI: '}
-                    {message.parts.map((part, i) => {
-                        switch (part.type) {
-                            case 'text':
-                                return <div key={`${message.id}-${i}`}>{part.text}</div>;
-                        }
-                    })}
-                </div>
-            ))}
+        <div>
+            <div>
+                {conversation.map((message, index) => (
+                    <div key={index}>
+                        {message.role}: <ReactMarkdown>{message.content}</ReactMarkdown>
+                    </div>
+                ))}
+            </div>
 
-            <form onSubmit={event => {
-                event.preventDefault();
-                sendMessage({text: input})
-                setInput('')
-            }}>
+            <div>
                 <input
-                    className="fixed dark:bg-zinc-900 bottom-0 w-full max-w-md p-2 mb-8 border border-zinc-300 dark:border-zinc-800 rounded shadow-xl"
+                    type="text"
                     value={input}
-                    placeholder="Say something..."
-                    onChange={e => setInput(e.currentTarget.value)}
+                    onChange={event => {
+                        setInput(event.target.value);
+                    }}
                 />
-            </form>
+                <button
+                    onClick={async () => {
+                        const { messages, newMessage } = await continueConversation([
+                            ...conversation,
+                            { role: 'user', content: input },
+                        ]);
+
+                        let textContent = '';
+
+                        for await (const delta of readStreamableValue(newMessage)) {
+                            textContent = `${textContent}${delta}`;
+
+                            setConversation([
+                                ...messages,
+                                { role: 'assistant', content: textContent },
+                            ]);
+                        }
+                    }}
+                >
+                    Send Message
+                </button>
+            </div>
         </div>
     );
 }
