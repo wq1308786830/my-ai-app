@@ -1,29 +1,76 @@
 import {
     APICallError,
-    InvalidResponseDataError,
     LanguageModelV2,
     LanguageModelV2CallOptions,
     LanguageModelV2CallWarning,
-    LanguageModelV2Content, LanguageModelV2Prompt, LanguageModelV2StreamPart
+    LanguageModelV2Content,
+    LanguageModelV2DataContent, LanguageModelV2FinishReason,
+    LanguageModelV2FunctionTool, LanguageModelV2Prompt, LanguageModelV2ProviderDefinedTool, LanguageModelV2StreamPart,
+    LanguageModelV2ToolChoice
 } from '@ai-sdk/provider';
-import { postJsonToApi } from '@ai-sdk/provider-utils';
+import {postJsonToApi, ToolCall} from '@ai-sdk/provider-utils';
+
+interface APIResponse {
+    choices: {
+        message: {
+            role: string;
+            content: string;
+            tool_calls?:  ToolCall<string, string>[];
+        };
+        finish_reason: string;
+    }[];
+    usage: {
+        prompt_tokens: number;
+        completion_tokens: number;
+        total_tokens: number;
+    };
+}
+
+interface ParsedChunk {
+    id: string;
+    choices: {
+        delta: {
+            content?: string;
+            tool_calls?:  ToolCall<string, string>[];
+        };
+        finish_reason?: string;
+    }[];
+    usage?: {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        total_tokens?: number;
+    };
+}
+
+interface AssistantMessage {
+    role: string;
+    content: string | { type: string; text?: string; data?: LanguageModelV2DataContent }[];
+    tool_calls?: ToolCall<string, string>[];
+}
+
 
 const prefixUrl = 'http://localhost:8888/v1';
+
+export interface CustomChatLanguageModelConfig {
+    provider: string;
+    apiKey?: string;
+    headers?: () => Record<string, string>;
+    // [key: string]: any;
+}
 
 export class CustomChatLanguageModel implements LanguageModelV2 {
     readonly specificationVersion = 'v2';
     readonly provider: string;
     readonly modelId: string;
-    readonly config: string;
+    readonly config: CustomChatLanguageModelConfig;
 
     constructor(
         modelId: string,
-        settings?: any,
-        config?: any,
+        config?: CustomChatLanguageModelConfig
     ) {
-        this.provider = config?.provider;
+        this.provider = config?.provider || '';
         this.modelId = modelId;
-        this.config = config;
+        this.config = config ?? { provider: '' };
         // Initialize with settings and config
     }
 
@@ -56,61 +103,83 @@ export class CustomChatLanguageModel implements LanguageModelV2 {
     async doGenerate(options: LanguageModelV2CallOptions) {
         const { args, warnings } = this.getArgs(options);
 
-        // Make API call
-        const response = await postJsonToApi({
+        // 发送请求
+        const response = await postJsonToApi<APIResponse>({
             url: `${prefixUrl}/chat/completions`,
             headers: {
                 // ...this.config.headers()
             },
             body: args,
-            failedResponseHandler(options: {
-                url: string;
-                requestBodyValues: unknown;
-                response: Response
-            }): PromiseLike<{ value: APICallError; rawValue?: unknown; responseHeaders?: Record<string, string> }> {
-                return Promise.resolve({value: '' as any });
+            failedResponseHandler(options) {
+                return options.response.json().then((responseBody) => {
+                    const error = new APICallError({
+                        message: responseBody.error?.message || 'Unknown error',
+                        url: options.url,
+                        requestBodyValues: options.requestBodyValues,
+                        statusCode: options.response.status,
+                        cause: options.response,
+                        isRetryable: options.response.status >= 500 && options.response.status < 600,
+                    });
+                    const responseHeaders = Object.fromEntries(options.response.headers.entries());
+                    return { value: error, rawValue: responseBody, responseHeaders };
+                }).catch((parseError) => {
+                    const error = new APICallError({
+                        message: 'Failed to parse response body',
+                        url: options.url,
+                        requestBodyValues: options.requestBodyValues,
+                        statusCode: options.response.status,
+                        cause: parseError,
+                        isRetryable: options.response.status >= 500 && options.response.status < 600,
+                    });
+                    const responseHeaders = Object.fromEntries(options.response.headers.entries());
+                    return { value: error, rawValue: null, responseHeaders };
+                });
             },
-            successfulResponseHandler(options: {
-                url: string;
-                requestBodyValues: unknown;
-                response: Response
-            }): PromiseLike<{ value: T; rawValue?: unknown; responseHeaders?: Record<string, string> }> {
-                return Promise.resolve({value: ''});
+            successfulResponseHandler(options) {
+                return options.response.json().then((responseBody) => {
+                    const responseHeaders = Object.fromEntries(options.response.headers.entries());
+                    return { value: responseBody as APIResponse, rawValue: responseBody, responseHeaders };
+                }).catch(() => {
+                    return { value: {} as APIResponse, rawValue: null, responseHeaders: {} };
+                });
             },
             abortSignal: options.abortSignal
         });
 
-        // Convert provider response to AI SDK format
+        // 转换响应为AI SDK5内容格式
         const content: LanguageModelV2Content[] = [];
+        const choice = response.value.choices[0];
 
-        // Extract text content
-        if (response.choices[0].message.content) {
+        if (choice.message.content) {
             content.push({
                 type: 'text',
-                text: response.choices[0].message.content,
+                text: choice.message.content,
             });
         }
 
-        // Extract tool calls
-        if (response.choices[0].message.tool_calls) {
-            for (const toolCall of response.choices[0].message.tool_calls) {
+        if (choice.message.tool_calls) {
+            for (const toolCall of choice.message.tool_calls) {
                 content.push({
                     type: 'tool-call',
-                    // toolCallType: 'function',
+                    // @ts-expect-error inner type
                     toolCallId: toolCall.id,
+                    // @ts-expect-error inner type
                     toolName: toolCall.function.name,
+                    // @ts-expect-error inner type
                     input: JSON.stringify(toolCall.function.arguments),
                 });
             }
         }
 
+        const finishReason: LanguageModelV2FinishReason = this.mapFinishReason(choice.finish_reason);
+
         return {
             content,
-            finishReason: this.mapFinishReason(response.choices[0].finish_reason),
+            finishReason,
             usage: {
-                inputTokens: response.usage?.prompt_tokens,
-                outputTokens: response.usage?.completion_tokens,
-                totalTokens: response.usage?.total_tokens,
+                inputTokens: response.value.usage?.prompt_tokens,
+                outputTokens: response.value.usage?.completion_tokens,
+                totalTokens: response.value.usage?.total_tokens,
             },
             request: { body: args },
             response: { body: response },
@@ -171,7 +240,7 @@ export class CustomChatLanguageModel implements LanguageModelV2 {
                                         },
                                     };
                                 default:
-                                    throw new Error(`Unsupported part type: ${part.type}`);
+                                    throw new Error(`Unsupported part type: ${part}`);
                             }
                         }),
                     };
@@ -185,16 +254,31 @@ export class CustomChatLanguageModel implements LanguageModelV2 {
                     return this.convertToolMessage(message);
 
                 default:
-                    throw new Error(`Unsupported message role: ${message.role}`);
+                    throw new Error(`Unsupported message role: ${message}`);
             }
         });
     }
 
+    private mapFinishReason(reason: string | null): LanguageModelV2FinishReason {
+        switch (reason) {
+            case 'stop':
+                return 'stop';
+            case 'length':
+                return 'length';
+            case 'content-filter':
+                return 'content-filter';
+            case 'null':
+                return 'stop'; // 或者其他默认值
+            default:
+                throw new Error(`Unsupported finish reason: ${reason}`);
+        }
+    }
+
     private createTransformer(warnings: LanguageModelV2CallWarning[]) {
         let isFirstChunk = true;
+        const mapFinishReason = this.mapFinishReason; // 保存引用
 
-        // return new TransformStream<ParsedChunk, LanguageModelV2StreamPart>({
-        return new TransformStream<any, LanguageModelV2StreamPart>({
+        return new TransformStream<ParsedChunk, LanguageModelV2StreamPart>({
             async transform(chunk, controller) {
                 // Send warnings with first chunk
                 if (isFirstChunk) {
@@ -204,7 +288,6 @@ export class CustomChatLanguageModel implements LanguageModelV2 {
 
                 // Handle different chunk types
                 if (chunk.choices?.[0]?.delta?.content) {
-                    // console.log('JSON.stringify(chunk) === ', JSON.stringify(chunk))
                     controller.enqueue({
                         id: chunk.id,
                         type: 'text-delta',
@@ -215,9 +298,12 @@ export class CustomChatLanguageModel implements LanguageModelV2 {
                 if (chunk.choices?.[0]?.delta?.tool_calls) {
                     for (const toolCall of chunk.choices[0].delta.tool_calls) {
                         controller.enqueue({
-                            type: 'tool-call', // 按照AI SDK标准类型
+                            type: 'tool-call',
+                            // @ts-expect-error inner type
                             toolCallId: toolCall.id,
+                            // @ts-expect-error inner type
                             toolName: toolCall.function.name,
+                            // @ts-expect-error inner type
                             input: JSON.stringify(toolCall.function.arguments),
                         });
                     }
@@ -227,25 +313,27 @@ export class CustomChatLanguageModel implements LanguageModelV2 {
                 if (chunk.choices?.[0]?.finish_reason) {
                     controller.enqueue({
                         id: chunk.id,
-                        type: 'text-end', // 按照AI SDK标准类型
-                        // finishReason: chunk.choices[0].finish_reason,
-                        // usage: {
-                        //     inputTokens: chunk.usage?.prompt_tokens,
-                        //     outputTokens: chunk.usage?.completion_tokens,
-                        //     totalTokens: chunk.usage?.total_tokens,
-                        // },
+                        type: 'text-end',
+                        // @ts-expect-error inner type
+                        finishReason: mapFinishReason(chunk.choices[0].finish_reason),
+                        usage: {
+                            inputTokens: chunk.usage?.prompt_tokens,
+                            outputTokens: chunk.usage?.completion_tokens,
+                            totalTokens: chunk.usage?.total_tokens,
+                        },
                     });
                 }
             },
         });
     }
 
+
     private handleError(error: unknown): never {
         if (error instanceof Response) {
             const status = error.status;
 
             if (status === 429) {
-                console.error('TooManyRequestsError')
+                console.error('TooManyRequestsError');
                 // throw new TooManyRequestsError({
                 //     cause: error,
                 //     retryAfter: this.getRetryAfter(error),
@@ -266,22 +354,20 @@ export class CustomChatLanguageModel implements LanguageModelV2 {
         throw error;
     }
 
-    private convertAssistantMessage(message: any) {
+    private convertAssistantMessage(message: AssistantMessage) {
         console.log('convertAssistantMessage', message);
     }
-    private convertToolMessage(message: any) {
+    private convertToolMessage(message: AssistantMessage) {
         console.log('convertToolMessage', message);
     }
-    private convertFileToUrl(data: any) {
+    private convertFileToUrl(data: LanguageModelV2DataContent) {
         console.log('convertFileToUrl', data);
         return ''
     }
-    private mapFinishReason(reason: any) {
-        console.log('mapFinishReason', reason);
-    }
+
     private createParser() {
         // OpenAI SSE流解析器
-        return new TransformStream<string, any>({
+        return new TransformStream<string, ParsedChunk>({
             transform(chunk, controller) {
                 // 按行分割
                 const lines = chunk.split('\n');
@@ -295,15 +381,13 @@ export class CustomChatLanguageModel implements LanguageModelV2 {
                         controller.enqueue(parsed);
                     } catch (e) {
                         // 忽略解析错误
+                        console.log(e)
                     }
                 }
             }
         });
     }
-    private prepareTools(tools: any, choices: any) {
+    private prepareTools(tools: Array<LanguageModelV2FunctionTool | LanguageModelV2ProviderDefinedTool>, choices: LanguageModelV2ToolChoice | undefined) {
         console.log('prepareTools', tools, choices);
-    }
-    private getRetryAfter(error: any) {
-        console.log('getRetryAfter', error);
     }
 }

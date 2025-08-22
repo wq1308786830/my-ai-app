@@ -5,7 +5,6 @@ import { z } from 'zod';
 // Allow streaming responses up to 30 seconds
 export const maxDuration = 30;
 const ollamaPrefixUrl = 'http://localhost:11434/api';
-const ollamaChatApi = `${ollamaPrefixUrl}/chat`
 const ollama = createOllama({
     // optional settings, e.g.
     baseURL: ollamaPrefixUrl,
