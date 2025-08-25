@@ -22,7 +22,7 @@ export async function continueConversation(history: Message[]) {
 
     (async () => {
         const { textStream } = streamText({
-            model: ollama('qwen3:8b'),
+            model: ollama('qwen3:1.7b'),
             system: "你是一个中医大牛",
             messages: history,
         });
